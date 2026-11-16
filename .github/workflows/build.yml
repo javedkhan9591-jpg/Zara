@@ -1,0 +1,469 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Project files banao
+        run: |
+          set -e
+          mkdir -p app/src/main/java/com/jara/ai app/src/main/res/xml app/src/main/res/values
+          cat > settings.gradle.kts <<'JARA_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "JaraAI"
+          include(":app")
+          JARA_EOF
+          cat > build.gradle.kts <<'JARA_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          JARA_EOF
+          cat > gradle.properties <<'JARA_EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          JARA_EOF
+          cat > app/build.gradle.kts <<'JARA_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.jara.ai"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.jara.ai"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("com.squareup.okhttp3:okhttp:4.12.0")
+          }
+          JARA_EOF
+          cat > app/src/main/AndroidManifest.xml <<'JARA_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:allowBackup="false"
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.DeviceDefault.Light">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".JaraService"
+                      android:exported="true"
+                      android:label="@string/app_name"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/jara_config" />
+                  </service>
+              </application>
+          </manifest>
+          JARA_EOF
+          cat > app/src/main/res/values/strings.xml <<'JARA_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Jara AI</string>
+              <string name="service_desc">Jara AI awaaz se phone control karne ke liye</string>
+          </resources>
+          JARA_EOF
+          cat > app/src/main/res/xml/jara_config.xml <<'JARA_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagDefault"
+              android:canRetrieveWindowContent="true"
+              android:notificationTimeout="100"
+              android:description="@string/service_desc" />
+          JARA_EOF
+          cat > app/src/main/java/com/jara/ai/JaraService.kt <<'JARA_EOF'
+          package com.jara.ai
+
+          import android.accessibilityservice.AccessibilityService
+          import android.content.Intent
+          import android.os.Bundle
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+
+          class JaraService : AccessibilityService() {
+
+              companion object {
+                  var instance: JaraService? = null
+              }
+
+              override fun onServiceConnected() {
+                  instance = this
+              }
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  instance = null
+                  return super.onUnbind(intent)
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+
+              override fun onInterrupt() {}
+
+              fun goHome(): Boolean = performGlobalAction(GLOBAL_ACTION_HOME)
+
+              fun goBack(): Boolean = performGlobalAction(GLOBAL_ACTION_BACK)
+
+              fun openApp(name: String): Boolean {
+                  val pm = packageManager
+                  val main = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  val apps = pm.queryIntentActivities(main, 0)
+                  val match = apps.firstOrNull {
+                      it.loadLabel(pm).toString().contains(name, ignoreCase = true)
+                  } ?: return false
+                  val launch = pm.getLaunchIntentForPackage(match.activityInfo.packageName) ?: return false
+                  launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                  startActivity(launch)
+                  return true
+              }
+
+              fun clickByText(text: String): Boolean {
+                  val root = rootInActiveWindow ?: return false
+                  var node: AccessibilityNodeInfo? = root.findAccessibilityNodeInfosByText(text)?.firstOrNull()
+                  while (node != null && !node.isClickable) {
+                      node = node.parent
+                  }
+                  return node?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+              }
+
+              fun typeText(text: String): Boolean {
+                  val node = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+                  val args = Bundle()
+                  args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+                  return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+              }
+
+              fun scrollDown(): Boolean {
+                  val root = rootInActiveWindow ?: return false
+                  return findScrollable(root)?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) ?: false
+              }
+
+              private fun findScrollable(n: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+                  if (n == null) return null
+                  if (n.isScrollable) return n
+                  for (i in 0 until n.childCount) {
+                      val found = findScrollable(n.getChild(i))
+                      if (found != null) return found
+                  }
+                  return null
+              }
+
+              fun screenTexts(): String {
+                  val out = LinkedHashSet<String>()
+                  fun walk(n: AccessibilityNodeInfo?) {
+                      if (n == null || out.size >= 60) return
+                      val t = n.text?.toString() ?: n.contentDescription?.toString()
+                      if (!t.isNullOrBlank()) out.add(t.take(40))
+                      for (i in 0 until n.childCount) {
+                          walk(n.getChild(i))
+                      }
+                  }
+                  walk(rootInActiveWindow)
+                  return out.joinToString(" | ")
+              }
+          }
+          JARA_EOF
+          cat > app/src/main/java/com/jara/ai/JaraBrain.kt <<'JARA_EOF'
+          package com.jara.ai
+
+          import okhttp3.Call
+          import okhttp3.Callback
+          import okhttp3.MediaType.Companion.toMediaType
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import okhttp3.RequestBody.Companion.toRequestBody
+          import okhttp3.Response
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.io.IOException
+          import java.util.concurrent.TimeUnit
+
+          object JaraBrain {
+
+              private val client = OkHttpClient.Builder()
+                  .readTimeout(60, TimeUnit.SECONDS)
+                  .build()
+
+              private const val SYSTEM = """You are Jara AI, a voice assistant that controls an Android phone.
+          The user speaks Hindi or Hinglish. Convert the request into a JSON array of actions.
+          Output ONLY the JSON array, nothing else.
+          Available actions:
+          {"a":"open","t":"English app name, e.g. WhatsApp"}
+          {"a":"click","t":"exact text visible on screen"}
+          {"a":"type","t":"text to type into the focused field"}
+          {"a":"scroll"}
+          {"a":"home"}
+          {"a":"back"}
+          {"a":"say","t":"short reply in Hindi for the user"}
+          If the user only asks a question or chats, return a single say action with the answer.
+          Keep action lists short."""
+
+              fun think(
+                  apiKey: String,
+                  userText: String,
+                  screen: String,
+                  onResult: (List<JSONObject>) -> Unit,
+                  onError: (String) -> Unit
+              ) {
+                  val content = "User said: $userText\nCurrent screen texts: $screen"
+                  val body = JSONObject()
+                      .put("model", "claude-sonnet-5-5")
+                      .put("max_tokens", 600)
+                      .put("system", SYSTEM)
+                      .put(
+                          "messages",
+                          JSONArray().put(JSONObject().put("role", "user").put("content", content))
+                      )
+                      .toString()
+                      .toRequestBody("application/json".toMediaType())
+
+                  val req = Request.Builder()
+                      .url("https://api.anthropic.com/v1/messages")
+                      .header("x-api-key", apiKey)
+                      .header("anthropic-version", "2023-06-01")
+                      .post(body)
+                      .build()
+
+                  client.newCall(req).enqueue(object : Callback {
+                      override fun onFailure(call: Call, e: IOException) {
+                          onError("Internet error: " + e.message)
+                      }
+
+                      override fun onResponse(call: Call, response: Response) {
+                          val raw = response.body?.string() ?: ""
+                          if (!response.isSuccessful) {
+                              onError("Error " + response.code + ": " + raw.take(200))
+                              return
+                          }
+                          try {
+                              val reply = JSONObject(raw)
+                                  .getJSONArray("content")
+                                  .getJSONObject(0)
+                                  .getString("text")
+                              val start = reply.indexOf('[')
+                              val end = reply.lastIndexOf(']')
+                              val arr = JSONArray(reply.substring(start, end + 1))
+                              val list = ArrayList<JSONObject>()
+                              for (i in 0 until arr.length()) {
+                                  list.add(arr.getJSONObject(i))
+                              }
+                              onResult(list)
+                          } catch (e: Exception) {
+                              onError("Samajh nahi aaya: " + e.message)
+                          }
+                      }
+                  })
+              }
+          }
+          JARA_EOF
+          cat > app/src/main/java/com/jara/ai/MainActivity.kt <<'JARA_EOF'
+          package com.jara.ai
+
+          import android.app.Activity
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.graphics.Color
+          import android.graphics.Outline
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.Settings
+          import android.speech.RecognizerIntent
+          import android.speech.tts.TextToSpeech
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.ViewOutlineProvider
+          import android.widget.EditText
+          import android.widget.FrameLayout
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import org.json.JSONObject
+          import java.io.File
+          import java.util.Locale
+
+          class MainActivity : Activity(), TextToSpeech.OnInitListener {
+
+              private val bg = Color.parseColor("#05050F")
+              private val card = Color.parseColor("#15122E")
+              private val purple = Color.parseColor("#7C4DFF")
+              private val pink = Color.parseColor("#E879F9")
+              private val sub = Color.parseColor("#A9A4C9")
+
+              private lateinit var tts: TextToSpeech
+              private lateinit var status: TextView
+              private lateinit var avatar: ImageView
+              private lateinit var avatarEmoji: TextView
+              private lateinit var chatLog: TextView
+              private lateinit var historyLog: TextView
+              private lateinit var keyBox: EditText
+              private lateinit var inputBox: EditText
+              private lateinit var panels: Array<View>
+              private lateinit var tabs: Array<TextView>
+              private val handler = Handler(Looper.getMainLooper())
+              private val chatLines = StringBuilder()
+              private val reqSpeech = 100
+              private val reqPhoto = 101
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              private fun shape(color: Int, radiusDp: Int, strokeColor: Int = 0, strokeDp: Int = 0): GradientDrawable {
+                  val g = GradientDrawable()
+                  g.setColor(color)
+                  g.cornerRadius = dp(radiusDp).toFloat()
+                  if (strokeDp > 0) g.setStroke(dp(strokeDp), strokeColor)
+                  return g
+              }
+
+              private fun ovalGradient(): GradientDrawable {
+                  val g = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(pink, purple))
+                  g.shape = GradientDrawable.OVAL
+                  return g
+              }
+
+              private fun label(text: String, size: Float, color: Int): TextView {
+                  val t = TextView(this)
+                  t.text = text
+                  t.textSize = size
+                  t.setTextColor(color)
+                  return t
+              }
+
+              private fun pill(text: String, onClick: () -> Unit): TextView {
+                  val b = label(text, 16f, Color.WHITE)
+                  b.gravity = Gravity.CENTER
+                  b.background = shape(purple, 24)
+                  b.setPadding(dp(16), dp(14), dp(16), dp(14))
+                  val lp = LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      ViewGroup.LayoutParams.WRAP_CONTENT
+                  )
+                  lp.topMargin = dp(12)
+                  b.layoutParams = lp
+                  b.setOnClickListener { onClick() }
+                  return b
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  tts = TextToSpeech(this, this)
+                  val prefs = getSharedPreferences("jara", Context.MODE_PRIVATE)
+                  val match = ViewGroup.LayoutParams.MATCH_PARENT
+                  val wrap = ViewGroup.LayoutParams.WRAP_CONTENT
+
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setBackgroundColor(bg)
+
+                  // ---- Header ----
+                  val header = LinearLayout(this)
+                  header.orientation = LinearLayout.VERTICAL
+                  header.gravity = Gravity.CENTER
+                  header.setPadding(dp(16), dp(12), dp(16), dp(4))
+                  val title = label("JARA AI", 28f, Color.WHITE)
+                  title.typeface = Typeface.DEFAULT_BOLD
+                  title.letterSpacing = 0.15f
+                  header.addView(title)
+                  header.addView(label("तुम्हारा AI असिस्टेंट", 12f, sub))
+                  root.addView(header)
+
+                  // ---- Home ----
+                  val home = LinearLayout(this)
+                  home.orientation = LinearLayout.VERTICAL
+                  home.gravity = Gravity.CENTER_HORIZONTAL
+                  home.setPadding(dp(16), dp(8), dp(16), dp(16))
+
+                  val avatarFrame = FrameLayout(this)
+                  avatarFrame.layoutParams = LinearLayout.LayoutParams(dp(220), dp(220))
+                  avatar = ImageView(this)
+                  avatar.scaleType = ImageView.ScaleType.CENTER_CROP
+                  avatar.background = ovalGradient()
+                  avatar.clipToOutline = true
+                  avatar.outlineProvider = object : ViewOutlineProvider() {
+                      override fun getOutline(view: View, outline: Outline) {
+                          outline.setOval(0, 0, view.width, view.height)
+                      }
+                  }
+                  avatar.setOnClickListener { pickPhoto() }
+                  avatarFrame.addView(avatar, FrameLayout.LayoutParams(match, match))
+                  avatarEmoji = label("🎧", 64f, Color.WHITE)
+                  avatarEmoji.gravity = Gravity.CENTER
+                  avatarFrame.addView(avatarEmoji, FrameLayout.LayoutParams(match, match))
+                  home.addView(avatarFrame)
+                  home.addView(label("फोटो बदलने के लिए गोले पर दबाओ", 11f, sub))
+
+                  val mic = TextView(this)
+                  mic.text = "🎤"
+                  mic.textSize = 34f
+                  mic.gravity = Gravity.CENTER
+                  mic.background = ovalGradient()
+                  val micLp = LinearLayout.LayoutParams(dp(96), dp(96))
+    
